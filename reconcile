@@ -1,0 +1,95 @@
+#!/usr/bin/bash
+# Minimal Reconciliation Service API client.
+# Requires bash, curl and jq.
+# No support of properties, suggest nor data extension
+
+set -euo pipefail
+
+usage() {
+    echo "$0 [options] [queries...]"
+    echo "Options:"
+    echo "  -a URL     API endpoint URL (required)"
+    echo "  -t id      type (optional)"
+    echo "  -v version API version (0.1/0.2=default/draft)"
+    echo "  -l number  limit (default: 10)"
+    echo "  -n         don't execute request but print it"
+    echo
+    echo "Examples:"
+    echo "  $0 -a https://wikidata.reconci.link/en/api"
+    echo "  $0 -a https://wikidata.reconci.link/en/api Marx"
+    echo "  $0 -a https://services.getty.edu/vocab/reconcile/ -t /aat Maria"
+    echo "  $0 -n -v draft \"Emma Goldman\""
+    exit
+}
+
+api=
+limit=10
+version=0.2
+typeid=
+execute=1
+
+[ $# -eq 0 ] && usage
+
+while getopts "a:v:t:l:hn" arg; do
+    case "$arg" in
+        a) api="$OPTARG";;
+        v) version="$OPTARG";;
+        t) typeid="$OPTARG";;
+        l) limit="$OPTARG";;
+        n) execute=;;
+        *) usage;;
+    esac
+done
+shift $(($OPTIND - 1))
+
+if [[ ! "$api" =~ ^https?://.* ]]; then
+    if [ ! -z "$execute" ]; then    
+        echo "Missing API endpoint (-a)"
+        exit 1
+    fi
+fi
+
+if [ "$version" == "draft" ]; then
+    api=${api%/}/reconcile
+fi
+
+fetch() {
+    set +e
+    res=$(curl -s "$@" 2>&1)
+    ok=$?
+    set -e
+    if [ "$ok" -eq 0 ]; then
+        echo "$res" | jq
+    else
+        echo "$res"
+        exit 1
+    fi
+}
+
+if [ $# -eq 0 ]; then
+    if [ -z "$execute" ]; then 
+        echo "$api"
+    else
+        fetch "$api"
+    fi
+else
+    queries=$(for query in "$@"; do echo "$query"; done | jq --raw-input .)
+    if [ "$version" == "draft" ]; then
+        request=$(echo "$queries" | jq --slurp --arg type "$typeid" --arg limit "$limit" \
+            '{queries:map({query:.,limit:($limit|tonumber)}+if $type!="" then {$type} else {} end)}'
+        )
+    else
+        request=$(echo "$queries" | jq --slurp --arg type "$typeid" --arg limit "$limit" \
+            'map({key:.,value:({query:.,limit:($limit|tonumber)}+if $type!="" then {$type} else {} end)})|from_entries'
+        )
+    fi
+    if [ -z "$execute" ]; then
+        echo "$request" | jq
+    else
+        if [ "$version" == "draft" ]; then
+            fetch -X POST --fail-with-body "$api" -H 'Content-Type: application/json' -d "$request"
+        else
+            fetch -X POST --fail-with-body "$api" -d "queries=$request"
+        fi
+    fi
+fi
